@@ -35,6 +35,7 @@ import org.apache.nifi.processor.util.StandardValidators;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.math.BigInteger;
 import java.net.InetSocketAddress;
 import java.net.StandardSocketOptions;
 import java.nio.ByteBuffer;
@@ -121,8 +122,6 @@ public final class GetTCP extends AbstractProcessor {
     private SocketRecveiverThread socketRecveiverThread = null;
     private Future receiverThreadFuture = null;
     private ExecutorService executorService = Executors.newFixedThreadPool(1);
-    private ComponentLog log = getLogger();
-
 
     /**
      * Bounded queue of messages events from the socket.
@@ -144,6 +143,9 @@ public final class GetTCP extends AbstractProcessor {
 
         //setup the socket
         try {
+
+            final ComponentLog log = getLogger();
+            //log.info("Creating a new SocketChannel");
             client = SocketChannel.open();
             InetSocketAddress inetSocketAddress = new InetSocketAddress(context.getProperty(SERVER_ADDRESS).getValue(),
                     context.getProperty(PORT).asInteger());
@@ -151,7 +153,7 @@ public final class GetTCP extends AbstractProcessor {
             client.setOption(StandardSocketOptions.SO_RCVBUF,context.getProperty(RECEIVE_BUFFER_SIZE).asInteger());
             client.connect(inetSocketAddress);
             client.configureBlocking(false);
-            socketRecveiverThread = new SocketRecveiverThread(client,context.getProperty(RECEIVE_BUFFER_SIZE).asInteger());
+            socketRecveiverThread = new SocketRecveiverThread(client,context.getProperty(RECEIVE_BUFFER_SIZE).asInteger(),log);
             if(executorService.isShutdown()){
                 executorService = Executors.newFixedThreadPool(1);
             }
@@ -165,6 +167,7 @@ public final class GetTCP extends AbstractProcessor {
     @OnStopped
     public void tearDown() throws ProcessException {
         try {
+            //log.info("Stop processing....");
             socketRecveiverThread.stopProcessing();
             receiverThreadFuture.cancel(true);
             executorService.shutdown();
@@ -172,7 +175,7 @@ public final class GetTCP extends AbstractProcessor {
                     executorService.shutdownNow();
 
                     if (!executorService.awaitTermination(5, TimeUnit.SECONDS))
-                        log.error("Executor service for receiver thread did not terminate");
+                        getLogger().error("Executor service for receiver thread did not terminate");
             }
             client.close();
         } catch (final Exception e) {
@@ -180,13 +183,21 @@ public final class GetTCP extends AbstractProcessor {
         }
     }
 
+    private String toHex(String arg) throws Exception {
+        return String.format("%040x", new BigInteger(1, arg.getBytes("UTF-8")));
+    }
+
     @Override
     public void onTrigger(ProcessContext context, ProcessSession session) throws ProcessException {
 
         try {
 
+            final ComponentLog log = getLogger();
+
             if(client.isOpen()) {
-                final String messages = socketMessagesReceived.poll(100, TimeUnit.MILLISECONDS);
+                final String messages = socketMessagesReceived.poll(1000, TimeUnit.MILLISECONDS);
+
+                log.error("Found messages " + messages);
 
                 if (messages == null) {
                     return;
@@ -216,11 +227,12 @@ public final class GetTCP extends AbstractProcessor {
         private SocketChannel socketChannel = null;
         private boolean keepProcessing = true;
         private int bufferSize;
-        private ComponentLog log = getLogger();
+        private ComponentLog log;
 
-        SocketRecveiverThread(SocketChannel client, int bufferSize) {
+        SocketRecveiverThread(SocketChannel client, int bufferSize,ComponentLog log ) {
             socketChannel = client;
             this.bufferSize = bufferSize;
+            this.log = log;
         }
 
         void stopProcessing(){
@@ -235,13 +247,13 @@ public final class GetTCP extends AbstractProcessor {
                 while (keepProcessing) {
                     if(socketChannel.isOpen() && socketChannel.isConnected()) {
                         while ((nBytes = socketChannel.read(buf)) > 0) {
-                            log.debug("Read {} from socket", new Object[]{nBytes});
+                            log.info("Read {} from socket", new Object[]{nBytes});
                             buf.flip();
                             Charset charset = Charset.forName(StandardCharsets.UTF_8.name());
                             CharsetDecoder decoder = charset.newDecoder();
                             CharBuffer charBuffer = decoder.decode(buf);
                             final String message = charBuffer.toString();
-                            log.debug("Received Message: {}", new Object[]{message});
+                            log.info("Received Message: {}", new Object[]{message});
                             socketMessagesReceived.offer(message);
                             buf.flip();
                         }
