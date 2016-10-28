@@ -35,8 +35,8 @@ import org.apache.nifi.processor.util.StandardValidators;
 
 import java.io.IOException;
 import java.io.OutputStream;
-import java.math.BigInteger;
 import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.net.StandardSocketOptions;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
@@ -73,14 +73,14 @@ public final class GetTCP extends AbstractProcessor {
             .description("The size of the buffer to receive data in")
             .required(false)
             .defaultValue("2048")
-            .addValidator(StandardValidators.createLongValidator(1, 2048, true))
+            .addValidator(StandardValidators.createLongValidator(1, 4096, true))
             .build();
 
     public static final PropertyDescriptor KEEP_ALIVE = new PropertyDescriptor
             .Builder().name("Keep Alive")
             .description("This determines if TCP keep alive is used.")
             .required(false)
-            .defaultValue("true")
+            .defaultValue("false")
             .allowableValues("true", "false")
             .addValidator(StandardValidators.BOOLEAN_VALIDATOR)
             .build();
@@ -123,6 +123,8 @@ public final class GetTCP extends AbstractProcessor {
     private Future receiverThreadFuture = null;
     private ExecutorService executorService = Executors.newFixedThreadPool(1);
 
+    private Socket clientSocket;
+
     /**
      * Bounded queue of messages events from the socket.
      */
@@ -141,7 +143,6 @@ public final class GetTCP extends AbstractProcessor {
     @OnScheduled
     public void onScheduled(final ProcessContext context) throws ProcessException {
 
-        //setup the socket
         try {
 
             final ComponentLog log = getLogger();
@@ -152,7 +153,7 @@ public final class GetTCP extends AbstractProcessor {
             client.setOption(StandardSocketOptions.SO_KEEPALIVE,context.getProperty(KEEP_ALIVE).asBoolean());
             client.setOption(StandardSocketOptions.SO_RCVBUF,context.getProperty(RECEIVE_BUFFER_SIZE).asInteger());
             client.connect(inetSocketAddress);
-            client.configureBlocking(false);
+            client.configureBlocking(true);
             socketRecveiverThread = new SocketRecveiverThread(client,context.getProperty(RECEIVE_BUFFER_SIZE).asInteger(),log);
             if(executorService.isShutdown()){
                 executorService = Executors.newFixedThreadPool(1);
@@ -162,6 +163,16 @@ public final class GetTCP extends AbstractProcessor {
         } catch (IOException e) {
             throw new ProcessException(e);
         }
+
+//        try {
+//            if(executorService.isShutdown()){
+//                executorService = Executors.newFixedThreadPool(1);
+//            }
+//            receiverThreadFuture = executorService.submit(socketRecveiverThread);
+//
+//        } catch (Exception e) {
+//            throw new ProcessException(e);
+//        }
     }
 
     @OnStopped
@@ -181,10 +192,19 @@ public final class GetTCP extends AbstractProcessor {
         } catch (final Exception e) {
             throw new ProcessException(e);
         }
+
+//        try {
+//            clientSocket.close();
+//        } catch (final Exception e) {
+//            throw new ProcessException(e);
+//        }
     }
 
-    private String toHex(String arg) throws Exception {
-        return String.format("%040x", new BigInteger(1, arg.getBytes("UTF-8")));
+    public static String byteArrayToHex(byte[] a) {
+        StringBuilder sb = new StringBuilder(a.length * 2);
+        for(byte b: a)
+            sb.append(String.format(" [%02x]", b & 0xff));
+        return sb.toString();
     }
 
     @Override
@@ -195,12 +215,13 @@ public final class GetTCP extends AbstractProcessor {
             final ComponentLog log = getLogger();
 
             if(client.isOpen()) {
-                final String messages = socketMessagesReceived.poll(1000, TimeUnit.MILLISECONDS);
-
-                log.error("Found messages " + messages);
+                final String messages = socketMessagesReceived.poll(100, TimeUnit.MILLISECONDS);
 
                 if (messages == null) {
+                    log.error("Read : EMPTY");
                     return;
+                } else {
+                    log.error("Read : " + messages + " - " + byteArrayToHex(messages.getBytes()));
                 }
 
                 // final Map<String, String> attributes = new HashMap<>();
@@ -221,6 +242,66 @@ public final class GetTCP extends AbstractProcessor {
         }
     }
 
+//    private class SocketRecveiverThread implements Runnable {
+//
+//        private Socket socketChannel = null;
+//        private boolean keepProcessing = true;
+//        private int bufferSize;
+//        private ComponentLog log;
+//
+//        SocketRecveiverThread(Socket client, int bufferSize,ComponentLog log ) {
+//            socketChannel = client;
+//            this.bufferSize = bufferSize;
+//            this.log = log;
+//        }
+//
+//        void stopProcessing(){
+//            keepProcessing = false;
+//        }
+//        public void run() {
+//            log.error("Starting to receive messages with buf " + bufferSize);
+//
+//            try {
+//
+//            InputStream is = clientSocket.getInputStream();
+//            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+//
+//            while(true) {
+//
+//                int n = is.read();
+//                if( n < 0 ) break;
+//
+//                if ( n == 0x04) {
+//                    String msg = new String(baos.toByteArray());
+//                    System.out.println("read = " + msg);
+//                    socketMessagesReceived.offer(msg);
+//                    baos = new ByteArrayOutputStream();
+//                } else {
+//                    baos.write(n);
+//                }
+//
+//            }
+//
+//
+//        } catch (IOException e) {
+//            e.printStackTrace();
+//
+//        }
+//
+//
+//
+//        }
+//
+//        private boolean containsEOT(CharBuffer charBuffer) {
+//            char[] charArray = charBuffer.array();
+//            for (int i = 0; i < charArray.length; i++) {
+//                if (charArray[i] == 0x04) {
+//                    return true;
+//                }
+//            }
+//            return false;
+//        }
+//    }
 
     private class SocketRecveiverThread implements Runnable {
 
@@ -239,7 +320,7 @@ public final class GetTCP extends AbstractProcessor {
             keepProcessing = false;
         }
         public void run() {
-            log.debug("Starting to receive messages");
+            log.error("Starting to receive messages with buf " + bufferSize);
 
             int nBytes = 0;
             ByteBuffer buf = ByteBuffer.allocate(bufferSize);
@@ -247,15 +328,16 @@ public final class GetTCP extends AbstractProcessor {
                 while (keepProcessing) {
                     if(socketChannel.isOpen() && socketChannel.isConnected()) {
                         while ((nBytes = socketChannel.read(buf)) > 0) {
-                            log.info("Read {} from socket", new Object[]{nBytes});
+                            log.error("Read {} from socket", new Object[]{nBytes});
                             buf.flip();
                             Charset charset = Charset.forName(StandardCharsets.UTF_8.name());
                             CharsetDecoder decoder = charset.newDecoder();
                             CharBuffer charBuffer = decoder.decode(buf);
+
                             final String message = charBuffer.toString();
-                            log.info("Received Message: {}", new Object[]{message});
+                            log.error("Received Message: {}", new Object[]{message});
                             socketMessagesReceived.offer(message);
-                            buf.flip();
+                            buf.clear();
                         }
                     }
                 }
@@ -266,6 +348,16 @@ public final class GetTCP extends AbstractProcessor {
             }
 
 
+        }
+
+        private boolean containsEOT(CharBuffer charBuffer) {
+            char[] charArray = charBuffer.array();
+            for (int i = 0; i < charArray.length; i++) {
+                if (charArray[i] == 0x04) {
+                    return true;
+                }
+            }
+            return false;
         }
     }
 }
