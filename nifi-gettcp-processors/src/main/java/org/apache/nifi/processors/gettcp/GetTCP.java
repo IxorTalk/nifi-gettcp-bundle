@@ -242,6 +242,9 @@ public final class GetTCP extends AbstractProcessor {
                     }
                 });
 
+                session.putAttribute(flowFile, "tcp.sender", context.getProperty(SERVER_ADDRESS).getValue());
+                session.putAttribute(flowFile, "tcp.port", context.getProperty(PORT).getValue());
+
                 session.transfer(flowFile, REL_SUCCESS);
 
             }
