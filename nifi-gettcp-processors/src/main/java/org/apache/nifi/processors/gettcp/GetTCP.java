@@ -39,11 +39,7 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.StandardSocketOptions;
 import java.nio.ByteBuffer;
-import java.nio.CharBuffer;
 import java.nio.channels.SocketChannel;
-import java.nio.charset.Charset;
-import java.nio.charset.CharsetDecoder;
-import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
 
@@ -52,6 +48,8 @@ import java.util.concurrent.*;
 @CapabilityDescription("Connects over TCP to the provided server. When receiving data this will writes either the" +
         " full receive buffer or messages based on demarcator to the content of a FlowFile. ")
 public final class GetTCP extends AbstractProcessor {
+
+    //private static final int EOT = 4;
 
     public static final PropertyDescriptor SERVER_ADDRESS = new PropertyDescriptor
             .Builder().name("Server Address")
@@ -85,6 +83,14 @@ public final class GetTCP extends AbstractProcessor {
             .addValidator(StandardValidators.BOOLEAN_VALIDATOR)
             .build();
 
+    public static final PropertyDescriptor MSG_DELIMITER = new PropertyDescriptor
+            .Builder().name("Message Delimiter")
+            .description("Bytesequence used to split flowfiles. when not provided, the flowfiles will be split according to buffer size.")
+            .required(false)
+            .defaultValue("04")
+            .addValidator(StandardValidators.NON_BLANK_VALIDATOR)
+            .build();
+
     public static final Relationship REL_SUCCESS = new Relationship.Builder()
             .name("Success")
             .description("The relationship that all sucessful messages from the WebSocket will be sent to")
@@ -108,6 +114,7 @@ public final class GetTCP extends AbstractProcessor {
         _propertyDescriptors.add(PORT);
         _propertyDescriptors.add(RECEIVE_BUFFER_SIZE);
         _propertyDescriptors.add(KEEP_ALIVE);
+        _propertyDescriptors.add(MSG_DELIMITER);
 
 
         propertyDescriptors = Collections.unmodifiableList(_propertyDescriptors);
@@ -122,6 +129,7 @@ public final class GetTCP extends AbstractProcessor {
     private SocketRecveiverThread socketRecveiverThread = null;
     private Future receiverThreadFuture = null;
     private ExecutorService executorService = Executors.newFixedThreadPool(1);
+    private BufferProcessor bufferProcessor = null;
 
     private Socket clientSocket;
 
@@ -142,7 +150,15 @@ public final class GetTCP extends AbstractProcessor {
 
     @OnScheduled
     public void onScheduled(final ProcessContext context) throws ProcessException {
+        connect(context);
+    }
 
+    @OnStopped
+    public void tearDown() throws ProcessException {
+        disconnect();
+    }
+
+    private void connect(ProcessContext context) {
         try {
 
             final ComponentLog log = getLogger();
@@ -153,8 +169,15 @@ public final class GetTCP extends AbstractProcessor {
             client.setOption(StandardSocketOptions.SO_KEEPALIVE,context.getProperty(KEEP_ALIVE).asBoolean());
             client.setOption(StandardSocketOptions.SO_RCVBUF,context.getProperty(RECEIVE_BUFFER_SIZE).asInteger());
             client.connect(inetSocketAddress);
-            client.configureBlocking(true);
-            socketRecveiverThread = new SocketRecveiverThread(client,context.getProperty(RECEIVE_BUFFER_SIZE).asInteger(),log);
+            client.configureBlocking(false);
+
+            if (!context.getProperty(MSG_DELIMITER).getValue().isEmpty()) {
+                bufferProcessor = new ByteSequenceDelimitedProcessor();
+            } else {
+                bufferProcessor = new BufferSizeDelimitedProcessor();
+            }
+
+            socketRecveiverThread = new SocketRecveiverThread(client,context.getProperty(RECEIVE_BUFFER_SIZE).asInteger(),context.getProperty(MSG_DELIMITER).getValue(),log,bufferProcessor);
             if(executorService.isShutdown()){
                 executorService = Executors.newFixedThreadPool(1);
             }
@@ -163,20 +186,9 @@ public final class GetTCP extends AbstractProcessor {
         } catch (IOException e) {
             throw new ProcessException(e);
         }
-
-//        try {
-//            if(executorService.isShutdown()){
-//                executorService = Executors.newFixedThreadPool(1);
-//            }
-//            receiverThreadFuture = executorService.submit(socketRecveiverThread);
-//
-//        } catch (Exception e) {
-//            throw new ProcessException(e);
-//        }
     }
 
-    @OnStopped
-    public void tearDown() throws ProcessException {
+    private void disconnect() {
         try {
             //log.info("Stop processing....");
             socketRecveiverThread.stopProcessing();
@@ -192,13 +204,9 @@ public final class GetTCP extends AbstractProcessor {
         } catch (final Exception e) {
             throw new ProcessException(e);
         }
-
-//        try {
-//            clientSocket.close();
-//        } catch (final Exception e) {
-//            throw new ProcessException(e);
-//        }
     }
+
+
 
     public static String byteArrayToHex(byte[] a) {
         StringBuilder sb = new StringBuilder(a.length * 2);
@@ -218,7 +226,7 @@ public final class GetTCP extends AbstractProcessor {
                 final String messages = socketMessagesReceived.poll(100, TimeUnit.MILLISECONDS);
 
                 if (messages == null) {
-                    log.error("Read : EMPTY");
+                    //log.error("Read : EMPTY");
                     return;
                 } else {
                     log.error("Read : " + messages + " - " + byteArrayToHex(messages.getBytes()));
@@ -242,78 +250,21 @@ public final class GetTCP extends AbstractProcessor {
         }
     }
 
-//    private class SocketRecveiverThread implements Runnable {
-//
-//        private Socket socketChannel = null;
-//        private boolean keepProcessing = true;
-//        private int bufferSize;
-//        private ComponentLog log;
-//
-//        SocketRecveiverThread(Socket client, int bufferSize,ComponentLog log ) {
-//            socketChannel = client;
-//            this.bufferSize = bufferSize;
-//            this.log = log;
-//        }
-//
-//        void stopProcessing(){
-//            keepProcessing = false;
-//        }
-//        public void run() {
-//            log.error("Starting to receive messages with buf " + bufferSize);
-//
-//            try {
-//
-//            InputStream is = clientSocket.getInputStream();
-//            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-//
-//            while(true) {
-//
-//                int n = is.read();
-//                if( n < 0 ) break;
-//
-//                if ( n == 0x04) {
-//                    String msg = new String(baos.toByteArray());
-//                    System.out.println("read = " + msg);
-//                    socketMessagesReceived.offer(msg);
-//                    baos = new ByteArrayOutputStream();
-//                } else {
-//                    baos.write(n);
-//                }
-//
-//            }
-//
-//
-//        } catch (IOException e) {
-//            e.printStackTrace();
-//
-//        }
-//
-//
-//
-//        }
-//
-//        private boolean containsEOT(CharBuffer charBuffer) {
-//            char[] charArray = charBuffer.array();
-//            for (int i = 0; i < charArray.length; i++) {
-//                if (charArray[i] == 0x04) {
-//                    return true;
-//                }
-//            }
-//            return false;
-//        }
-//    }
-
     private class SocketRecveiverThread implements Runnable {
 
         private SocketChannel socketChannel = null;
         private boolean keepProcessing = true;
         private int bufferSize;
         private ComponentLog log;
+        private String delimiter;
+        private BufferProcessor bufferProcessor;
 
-        SocketRecveiverThread(SocketChannel client, int bufferSize,ComponentLog log ) {
+        SocketRecveiverThread(SocketChannel client, int bufferSize,String delimiter, ComponentLog log, BufferProcessor bufferProcessor ) {
             socketChannel = client;
             this.bufferSize = bufferSize;
+            this.delimiter=delimiter;
             this.log = log;
+            this.bufferProcessor = bufferProcessor;
         }
 
         void stopProcessing(){
@@ -322,42 +273,37 @@ public final class GetTCP extends AbstractProcessor {
         public void run() {
             log.error("Starting to receive messages with buf " + bufferSize);
 
+            byte delim = (byte)Integer.parseInt(delimiter, 16);
+
+
             int nBytes = 0;
             ByteBuffer buf = ByteBuffer.allocate(bufferSize);
+            StringBuffer message = new StringBuffer();
             try {
                 while (keepProcessing) {
                     if(socketChannel.isOpen() && socketChannel.isConnected()) {
-                        while ((nBytes = socketChannel.read(buf)) > 0) {
-                            log.error("Read {} from socket", new Object[]{nBytes});
-                            buf.flip();
-                            Charset charset = Charset.forName(StandardCharsets.UTF_8.name());
-                            CharsetDecoder decoder = charset.newDecoder();
-                            CharBuffer charBuffer = decoder.decode(buf);
 
-                            final String message = charBuffer.toString();
-                            log.error("Received Message: {}", new Object[]{message});
-                            socketMessagesReceived.offer(message);
+                        if (nBytes==-1) {
+                            log.error(" +++++++++++++++++ found -1 bytes +++++++++++++");
+                            disconnect();
+                        }
+
+                        while ((nBytes = socketChannel.read(buf)) > 0) {
+
+                            buf.flip();
+
+                            message = bufferProcessor.processBuffer(delim, nBytes, buf, message,log,socketMessagesReceived);
+
                             buf.clear();
                         }
                     }
                 }
 
             } catch (IOException e) {
-                e.printStackTrace();
-
+                log.error("Error occured ",e);
             }
 
 
-        }
-
-        private boolean containsEOT(CharBuffer charBuffer) {
-            char[] charArray = charBuffer.array();
-            for (int i = 0; i < charArray.length; i++) {
-                if (charArray[i] == 0x04) {
-                    return true;
-                }
-            }
-            return false;
         }
     }
 }
