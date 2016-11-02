@@ -130,6 +130,7 @@ public final class GetTCP extends AbstractProcessor {
     private Future receiverThreadFuture = null;
     private ExecutorService executorService = Executors.newFixedThreadPool(1);
     private BufferProcessor bufferProcessor = null;
+    private InetSocketAddress inetSocketAddress = null;
 
     private Socket clientSocket;
 
@@ -164,7 +165,7 @@ public final class GetTCP extends AbstractProcessor {
             final ComponentLog log = getLogger();
             //log.info("Creating a new SocketChannel");
             client = SocketChannel.open();
-            InetSocketAddress inetSocketAddress = new InetSocketAddress(context.getProperty(SERVER_ADDRESS).getValue(),
+            inetSocketAddress = new InetSocketAddress(context.getProperty(SERVER_ADDRESS).getValue(),
                     context.getProperty(PORT).asInteger());
             client.setOption(StandardSocketOptions.SO_KEEPALIVE,context.getProperty(KEEP_ALIVE).asBoolean());
             client.setOption(StandardSocketOptions.SO_RCVBUF,context.getProperty(RECEIVE_BUFFER_SIZE).asInteger());
@@ -242,8 +243,8 @@ public final class GetTCP extends AbstractProcessor {
                     }
                 });
 
-                session.putAttribute(flowFile, "tcp.sender", context.getProperty(SERVER_ADDRESS).getValue());
-                session.putAttribute(flowFile, "tcp.port", context.getProperty(PORT).getValue());
+                flowFile = session.putAttribute(flowFile, "tcp.sender", context.getProperty(SERVER_ADDRESS).getValue());
+                flowFile = session.putAttribute(flowFile, "tcp.port", context.getProperty(PORT).getValue());
 
                 session.transfer(flowFile, REL_SUCCESS);
 
@@ -285,11 +286,6 @@ public final class GetTCP extends AbstractProcessor {
             try {
                 while (keepProcessing) {
                     if(socketChannel.isOpen() && socketChannel.isConnected()) {
-
-                        if (nBytes==-1) {
-                            log.error(" +++++++++++++++++ found -1 bytes +++++++++++++");
-                            disconnect();
-                        }
 
                         while ((nBytes = socketChannel.read(buf)) > 0) {
 
