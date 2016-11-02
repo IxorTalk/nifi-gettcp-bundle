@@ -30,11 +30,9 @@ import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.processor.Relationship;
 import org.apache.nifi.processor.exception.ProcessException;
-import org.apache.nifi.processor.io.OutputStreamCallback;
 import org.apache.nifi.processor.util.StandardValidators;
 
 import java.io.IOException;
-import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.StandardSocketOptions;
@@ -236,12 +234,7 @@ public final class GetTCP extends AbstractProcessor {
                 // final Map<String, String> attributes = new HashMap<>();
                 FlowFile flowFile = session.create();
 
-                flowFile = session.write(flowFile, new OutputStreamCallback() {
-                    @Override
-                    public void process(OutputStream out) throws IOException {
-                        out.write(messages.getBytes());
-                    }
-                });
+                flowFile = session.write(flowFile, out -> out.write(messages.getBytes()));
 
                 flowFile = session.putAttribute(flowFile, "tcp.sender", context.getProperty(SERVER_ADDRESS).getValue());
                 flowFile = session.putAttribute(flowFile, "tcp.port", context.getProperty(PORT).getValue());
@@ -266,7 +259,7 @@ public final class GetTCP extends AbstractProcessor {
         SocketRecveiverThread(SocketChannel client, int bufferSize,String delimiter, ComponentLog log, BufferProcessor bufferProcessor ) {
             socketChannel = client;
             this.bufferSize = bufferSize;
-            this.delimiter=delimiter;
+            this.delimiter = delimiter;
             this.log = log;
             this.bufferProcessor = bufferProcessor;
         }
