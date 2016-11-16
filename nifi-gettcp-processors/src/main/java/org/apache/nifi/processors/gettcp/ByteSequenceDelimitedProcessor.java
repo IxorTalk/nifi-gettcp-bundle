@@ -8,9 +8,11 @@ import java.util.concurrent.BlockingQueue;
 public class ByteSequenceDelimitedProcessor implements BufferProcessor {
 
     public StringBuffer processBuffer(byte delim, int nBytes, ByteBuffer buf, StringBuffer message, ComponentLog log, BlockingQueue<String> socketMessagesReceived) {
+        log.info("a = " + buf.toString());
+
         for (int i=0 ; i<nBytes ; i++) {
             byte b  = buf.get();
-            //System.out.println("b = " + String.format("[%02x] ", b));
+            log.info("b = " + String.format("[%02x] ", b));
             if (b==delim) {
                 socketMessagesReceived.offer(message.toString());
                 message = new StringBuffer();
