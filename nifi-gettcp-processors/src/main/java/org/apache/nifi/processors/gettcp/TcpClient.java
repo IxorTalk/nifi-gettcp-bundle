@@ -39,6 +39,7 @@ public abstract class TcpClient implements Runnable {
     private static final long MAXIMUM_RECONNECT_INTERVAL = 30000; // 30 sec.
     private static final int READ_BUFFER_SIZE = 0x100000;
     private static final int WRITE_BUFFER_SIZE = 0x100000;
+    static final int RECONNECT_DELAY = 5;
 
     private long reconnectInterval = INITIAL_RECONNECT_INTERVAL;
 
