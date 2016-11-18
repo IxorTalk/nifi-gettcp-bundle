@@ -32,10 +32,7 @@ import org.apache.nifi.processor.Relationship;
 import org.apache.nifi.processor.exception.ProcessException;
 import org.apache.nifi.processor.util.StandardValidators;
 
-import java.net.InetSocketAddress;
-import java.net.Socket;
 import java.util.*;
-import java.util.concurrent.*;
 
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.ChannelInitializer;
@@ -50,8 +47,6 @@ import io.netty.handler.timeout.IdleStateHandler;
 @CapabilityDescription("Connects over TCP to the provided server. When receiving data this will writes either the" +
         " full receive buffer or messages based on demarcator to the content of a FlowFile. ")
 public final class GetTCP extends AbstractProcessor {
-
-    //private static final int EOT = 4;
 
     public static final PropertyDescriptor SERVER_ADDRESS = new PropertyDescriptor
             .Builder().name("Server Address")
@@ -118,7 +113,6 @@ public final class GetTCP extends AbstractProcessor {
         _propertyDescriptors.add(KEEP_ALIVE);
         _propertyDescriptors.add(MSG_DELIMITER);
 
-
         propertyDescriptors = Collections.unmodifiableList(_propertyDescriptors);
 
         Set<Relationship> _relationships = new HashSet<>();
@@ -127,24 +121,12 @@ public final class GetTCP extends AbstractProcessor {
         relationships = Collections.unmodifiableSet(_relationships);
     }
 
-    private SocketChannel client = null;
-   // private SocketRecveiverThread socketRecveiverThread = null;
-    private Future receiverThreadFuture = null;
-    private ExecutorService executorService = Executors.newFixedThreadPool(1);
-    private BufferProcessor bufferProcessor = null;
-    private InetSocketAddress inetSocketAddress = null;
-    private ComponentLog log = getLogger();
-
-    private final UptimeHandler handler = new UptimeHandler(this, log);
+    private final TcpClientHandler handler = new TcpClientHandler(this);
     private ProcessContext context = null;
     private static final int READ_TIMEOUT = 50;
-    static final int RECONNECT_DELAY = 5;
-    private Socket clientSocket;
-
-    /**
-     * Bounded queue of messages events from the socket.
-     */
-    private final BlockingQueue<String> socketMessagesReceived = new ArrayBlockingQueue<>(256);
+    private BufferProcessor bufferProcessor;
+    private Bootstrap b;
+    private NioEventLoopGroup g;
 
     @Override
     public Set<Relationship> getRelationships() {
@@ -159,26 +141,29 @@ public final class GetTCP extends AbstractProcessor {
     @OnScheduled
     public void onScheduled(final ProcessContext context) throws ProcessException {
         this.context = context;
+        if (!context.getProperty(MSG_DELIMITER).getValue().isEmpty()) {
+            bufferProcessor = new ByteSequenceDelimitedProcessor();
+        } else {
+            bufferProcessor = new BufferSizeDelimitedProcessor();
+        }
         connect();
     }
 
     @OnStopped
     public void tearDown() throws ProcessException {
-        //disconnect();
+        g.shutdownGracefully();
     }
 
     private void connect() {
-        configureBootstrap(new Bootstrap()).connect();
-    }
-
-    private Bootstrap configureBootstrap(Bootstrap b) {
-        return configureBootstrap(b, new NioEventLoopGroup());
+        g = new NioEventLoopGroup();
+        b = configureBootstrap(new Bootstrap(), g);
+        b.connect();
     }
 
     Bootstrap configureBootstrap(Bootstrap b, EventLoopGroup g) {
         final ComponentLog log = getLogger();
         handler.setLog(log);
-        log.error(context.getProperty(SERVER_ADDRESS).getValue() + new Integer(context.getProperty(PORT).getValue()));
+        handler.setBufferProcessor(bufferProcessor);
         b.group(g)
                 .channel(NioSocketChannel.class)
                 .remoteAddress(context.getProperty(SERVER_ADDRESS).getValue(), new Integer(context.getProperty(PORT).getValue()))
@@ -192,56 +177,6 @@ public final class GetTCP extends AbstractProcessor {
         return b;
     }
 
-//    private void connect(ProcessContext context) {
-//        try {
-//
-//            final ComponentLog log = getLogger();
-//            //log.info("Creating a new SocketChannel");
-//            client = SocketChannel.open();
-//            inetSocketAddress = new InetSocketAddress(context.getProperty(SERVER_ADDRESS).getValue(),
-//                    context.getProperty(PORT).asInteger());
-//            client.setOption(StandardSocketOptions.SO_KEEPALIVE,context.getProperty(KEEP_ALIVE).asBoolean());
-//            client.setOption(StandardSocketOptions.SO_RCVBUF,context.getProperty(RECEIVE_BUFFER_SIZE).asInteger());
-//            client.connect(inetSocketAddress);
-//            client.configureBlocking(false);
-//
-//            if (!context.getProperty(MSG_DELIMITER).getValue().isEmpty()) {
-//                bufferProcessor = new ByteSequenceDelimitedProcessor();
-//            } else {
-//                bufferProcessor = new BufferSizeDelimitedProcessor();
-//            }
-//
-//            socketRecveiverThread = new SocketRecveiverThread(client,context.getProperty(RECEIVE_BUFFER_SIZE).asInteger(),context.getProperty(MSG_DELIMITER).getValue(),log,bufferProcessor);
-//            if(executorService.isShutdown()){
-//                executorService = Executors.newFixedThreadPool(1);
-//            }
-//            receiverThreadFuture = executorService.submit(socketRecveiverThread);
-//
-//        } catch (IOException e) {
-//            throw new ProcessException(e);
-//        }
-//    }
-
-//    private void disconnect() {
-//        try {
-//            //log.info("Stop processing....");
-//            socketRecveiverThread.stopProcessing();
-//            receiverThreadFuture.cancel(true);
-//            executorService.shutdown();
-//            if (!executorService.awaitTermination(5, TimeUnit.SECONDS)) {
-//                executorService.shutdownNow();
-//
-//                if (!executorService.awaitTermination(5, TimeUnit.SECONDS))
-//                    getLogger().error("Executor service for receiver thread did not terminate");
-//            }
-//            client.close();
-//        } catch (final Exception e) {
-//            throw new ProcessException(e);
-//        }
-//    }
-
-
-
     public static String byteArrayToHex(byte[] a) {
         StringBuilder sb = new StringBuilder(a.length * 2);
         for(byte b: a)
@@ -251,85 +186,27 @@ public final class GetTCP extends AbstractProcessor {
 
     @Override
     public void onTrigger(ProcessContext context, ProcessSession session) throws ProcessException {
-
         try {
-
             final ComponentLog log = getLogger();
+            final String messages = handler.poll();
 
+            if (messages == null) {
+                log.debug("Read : EMPTY");
+                return;
+            } else {
+                log.info(messages);
+                log.debug("Read : " + messages + " - " + byteArrayToHex(messages.getBytes()));
+            }
 
-                final String messages = handler.poll();
+            FlowFile flowFile = session.create();
+            flowFile = session.write(flowFile, out -> out.write(messages.getBytes()));
+            flowFile = session.putAttribute(flowFile, "tcp.sender", context.getProperty(SERVER_ADDRESS).getValue());
+            flowFile = session.putAttribute(flowFile, "tcp.port", context.getProperty(PORT).getValue());
 
-                if (messages == null) {
-                    //log.error("Read : EMPTY");
-                    return;
-                } else {
-                    log.error("Read : " + messages + " - " + byteArrayToHex(messages.getBytes()));
-                }
-
-                // final Map<String, String> attributes = new HashMap<>();
-                FlowFile flowFile = session.create();
-
-                flowFile = session.write(flowFile, out -> out.write(messages.getBytes()));
-
-                flowFile = session.putAttribute(flowFile, "tcp.sender", context.getProperty(SERVER_ADDRESS).getValue());
-                flowFile = session.putAttribute(flowFile, "tcp.port", context.getProperty(PORT).getValue());
-
-                session.transfer(flowFile, REL_SUCCESS);
-
+            session.transfer(flowFile, REL_SUCCESS);
 
         } catch (InterruptedException exception){
             throw new ProcessException(exception);
         }
     }
-
-//    private class SocketRecveiverThread implements Runnable {
-//
-//        private SocketChannel socketChannel = null;
-//        private boolean keepProcessing = true;
-//        private int bufferSize;
-//        private ComponentLog log;
-//        private String delimiter;
-//        private BufferProcessor bufferProcessor;
-//
-//        SocketRecveiverThread(SocketChannel client, int bufferSize,String delimiter, ComponentLog log, BufferProcessor bufferProcessor ) {
-//            socketChannel = client;
-//            this.bufferSize = bufferSize;
-//            this.delimiter = delimiter;
-//            this.log = log;
-//            this.bufferProcessor = bufferProcessor;
-//        }
-//
-//        void stopProcessing(){
-//            keepProcessing = false;
-//        }
-//        public void run() {
-//            log.error("Starting to receive messages with buf " + bufferSize);
-//
-//            byte delim = (byte)Integer.parseInt(delimiter, 16);
-//
-//
-//            int nBytes = 0;
-//            ByteBuffer buf = ByteBuffer.allocate(bufferSize);
-//            StringBuffer message = new StringBuffer();
-//            try {
-//                while (keepProcessing) {
-//                    if(socketChannel.isOpen() && socketChannel.isConnected()) {
-//
-//                        while ((nBytes = socketChannel.read(buf)) > 0) {
-//
-//                            buf.flip();
-//
-//                            message = bufferProcessor.processBuffer(delim, nBytes, buf, message,log,socketMessagesReceived);
-//
-//                            buf.clear();
-//                        }
-//                    }
-//                }
-//
-//            } catch (IOException e) {
-//                log.error("Error occured ",e);
-//            }
-//
-//        }
-//    }
 }

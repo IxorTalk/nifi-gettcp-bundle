@@ -34,15 +34,18 @@ import java.util.concurrent.TimeUnit;
 
 
 @Sharable
-public class UptimeHandler extends SimpleChannelInboundHandler<Object> {
+public class TcpClientHandler extends SimpleChannelInboundHandler<Object> {
 
     private final GetTCP client;
     private long startTime = -1;
     private static final int READ_TIMEOUT = 50;
+    private static final int RECONNECT_DELAY = 5;
     private final BlockingQueue<String> socketMessagesReceived = new ArrayBlockingQueue<>(256);
     private ComponentLog log = null;
+    private BufferProcessor bufferProcessor;
+    StringBuffer message = new StringBuffer();
 
-    public UptimeHandler(GetTCP client, ComponentLog log) {
+    public TcpClientHandler(GetTCP client) {
         this.client = client;
     }
 
@@ -56,7 +59,10 @@ public class UptimeHandler extends SimpleChannelInboundHandler<Object> {
 
     public void setLog(ComponentLog log) {
         this.log = log;
-        log.error("set log");
+    }
+
+    public void setBufferProcessor(BufferProcessor bufferProcessor) {
+        this.bufferProcessor = bufferProcessor;
     }
 
     @Override
@@ -76,8 +82,7 @@ public class UptimeHandler extends SimpleChannelInboundHandler<Object> {
     @Override
     public void channelInactive(final ChannelHandlerContext ctx) throws Exception {
         log.info("Disconnected from: " + ctx.channel().remoteAddress());
-
-        log.info("Sleeping for: " + TcpClient.RECONNECT_DELAY + 's');
+        log.info("Sleeping for: " + RECONNECT_DELAY + 's');
 
         final EventLoop loop = ctx.channel().eventLoop();
         loop.schedule(new TimerTask() {
@@ -86,7 +91,7 @@ public class UptimeHandler extends SimpleChannelInboundHandler<Object> {
                 log.info("Reconnecting to: " + ctx.channel().remoteAddress());
                 client.configureBootstrap(new Bootstrap(), loop).connect();
             }
-        }, client.RECONNECT_DELAY, TimeUnit.SECONDS);
+        }, RECONNECT_DELAY, TimeUnit.SECONDS);
     }
 
     @Override
@@ -105,34 +110,23 @@ public class UptimeHandler extends SimpleChannelInboundHandler<Object> {
         return socketMessagesReceived.poll(100, TimeUnit.MILLISECONDS);
     }
 
-//    @Override
-//    protected void messageReceived(ChannelHandlerContext channelHandlerContext, Object o) throws Exception {
-//        log.info("message received");
-//        ByteBuf in = (ByteBuf) o;
-//
-//        try {
-//            while (in.isReadable()) {
-//                log.info(new String(in.array()));
-//                socketMessagesReceived.offer(new String(in.array()));
-//
-//            }
-//        } catch (Exception e) {
-//            e.printStackTrace();
-//        } finally {
-//        }
-//    }
-
-
-
     protected void channelRead0(ChannelHandlerContext channelHandlerContext, Object o) throws Exception {
-        log.info("message received");
         ByteBuf in = (ByteBuf) o;
+        byte delim = (byte)Integer.parseInt("04", 16);
 
         try {
             while (in.isReadable()) {
-                log.info("readable input");
-                char c = (char) in.readByte();
-                socketMessagesReceived.offer(String.valueOf(c));
+                byte b = in.readByte();
+                if (b == delim) {
+                    socketMessagesReceived.offer(message.toString());
+                    message = new StringBuffer();
+                } else {
+                    try {
+                        message.append(new String(new byte[]{b}, "UTF-8"));
+                    } catch (Exception e) {
+                        log.error("Error occured while converting byte to string.",e);
+                    }
+                }
             }
         } catch (Exception e) {
             log.error("error reading messages: " + e.toString());
