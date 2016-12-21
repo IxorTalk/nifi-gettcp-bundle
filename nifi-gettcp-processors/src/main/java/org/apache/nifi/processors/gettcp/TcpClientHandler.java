@@ -23,10 +23,10 @@ import io.netty.channel.EventLoop;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.handler.timeout.IdleState;
 import io.netty.handler.timeout.IdleStateEvent;
+import io.netty.handler.timeout.ReadTimeoutException;
 import org.apache.nifi.logging.ComponentLog;
 
 import java.net.ConnectException;
-import java.nio.charset.Charset;
 import java.util.TimerTask;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
@@ -36,33 +36,27 @@ import java.util.concurrent.TimeUnit;
 @Sharable
 public class TcpClientHandler extends SimpleChannelInboundHandler<Object> {
 
+    public static final int POLLING_TIMEOUT_IN_MS = 100;
     private final GetTCP client;
-    private long startTime = -1;
-    private static final int READ_TIMEOUT = 50;
-    private static final int RECONNECT_DELAY = 5;
+    private final int reconnectDelayInSeconds;
+    private byte delimiter;
     private final BlockingQueue<String> socketMessagesReceived = new ArrayBlockingQueue<>(256);
     private ComponentLog log = null;
-    private BufferProcessor bufferProcessor;
     StringBuffer message = new StringBuffer();
 
-    public TcpClientHandler(GetTCP client) {
+    public TcpClientHandler(GetTCP client, int reconnectDelayInSeconds, byte delimiter) {
         this.client = client;
+        this.reconnectDelayInSeconds = reconnectDelayInSeconds;
+        this.delimiter = delimiter;
     }
 
     @Override
     public void channelActive(ChannelHandlerContext ctx) throws Exception {
-        if (startTime < 0) {
-            startTime = System.currentTimeMillis();
-        }
-        log.info("Connected to: " + ctx.channel().remoteAddress());
+        log.info("Connected to " + ctx.channel().remoteAddress());
     }
 
     public void setLog(ComponentLog log) {
         this.log = log;
-    }
-
-    public void setBufferProcessor(BufferProcessor bufferProcessor) {
-        this.bufferProcessor = bufferProcessor;
     }
 
     @Override
@@ -81,43 +75,50 @@ public class TcpClientHandler extends SimpleChannelInboundHandler<Object> {
 
     @Override
     public void channelInactive(final ChannelHandlerContext ctx) throws Exception {
-        log.info("Disconnected from: " + ctx.channel().remoteAddress());
-        log.info("Sleeping for: " + RECONNECT_DELAY + 's');
+        log.info("Channel marked inactive. Disconnected from " + ctx.channel().remoteAddress());
+        log.info("Sleeping for " + reconnectDelayInSeconds + "s before reconnecting");
 
         final EventLoop loop = ctx.channel().eventLoop();
         loop.schedule(new TimerTask() {
             @Override
             public void run() {
-                log.info("Reconnecting to: " + ctx.channel().remoteAddress());
-                client.configureBootstrap(new Bootstrap(), loop).connect();
+                log.info("Reconnecting to " + ctx.channel().remoteAddress());
+                Bootstrap b = new Bootstrap();
+                client.configureBootstrap(b, loop).connect().addListener(new ConnectionListener(b,log,reconnectDelayInSeconds));;
             }
-        }, RECONNECT_DELAY, TimeUnit.SECONDS);
+        }, reconnectDelayInSeconds, TimeUnit.SECONDS);
     }
 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
-        if (cause instanceof ConnectException) {
-            startTime = -1;
-        }
-        log.error("Failed to connect: " + cause.getMessage());
 
-        cause.printStackTrace();
+        if (cause instanceof ConnectException) {
+            log.error("Failed to connect.",cause);
+        }
+        if (cause instanceof ReadTimeoutException) {
+            // The connection was OK but there was no traffic for last period.
+            log.error("Disconnecting due to no inbound traffic.");
+        } else {
+            log.error("Disconnecting due to unknown error.");
+            cause.printStackTrace();
+        }
         ctx.close();
+
     }
 
 
-    public String poll () throws InterruptedException {
-        return socketMessagesReceived.poll(100, TimeUnit.MILLISECONDS);
+    public String poll() throws InterruptedException {
+        return socketMessagesReceived.poll(POLLING_TIMEOUT_IN_MS, TimeUnit.MILLISECONDS);
     }
 
     protected void channelRead0(ChannelHandlerContext channelHandlerContext, Object o) throws Exception {
         ByteBuf in = (ByteBuf) o;
-        byte delim = (byte)Integer.parseInt("04", 16);
+
 
         try {
             while (in.isReadable()) {
                 byte b = in.readByte();
-                if (b == delim) {
+                if (b == delimiter) {
                     socketMessagesReceived.offer(message.toString());
                     message = new StringBuffer();
                 } else {
@@ -129,10 +130,7 @@ public class TcpClientHandler extends SimpleChannelInboundHandler<Object> {
                 }
             }
         } catch (Exception e) {
-            log.error("error reading messages: " + e.toString());
-            e.printStackTrace();
-            throw e;
-        } finally {
+            log.error("Error occured while reading channel",e);
         }
     }
 }
