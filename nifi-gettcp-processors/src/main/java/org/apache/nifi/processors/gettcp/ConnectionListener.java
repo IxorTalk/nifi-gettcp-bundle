@@ -20,6 +20,15 @@ public class ConnectionListener implements ChannelFutureListener {
         this.reconnectDelayInSeconds = reconnectDelayInSeconds;
     }
 
+    /**
+     * Whenever we attempt a connection, regardless of the result (success or failure), this method will be called.
+     * In case of a failure, we'll attempt to reconnect again (defined by the reconnectDelayInSeconds param).
+     *
+     * We'll use the Netty bootstrap to attempt to connect again (and use the same ConnectionListener).
+     *
+     * @param channelFuture
+     * @throws Exception
+     */
     @Override
     public void operationComplete(ChannelFuture channelFuture) throws Exception {
 

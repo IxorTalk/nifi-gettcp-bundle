@@ -50,6 +50,13 @@ public class TcpClientHandler extends SimpleChannelInboundHandler<Object> {
         this.delimiter = delimiter;
     }
 
+    /**
+     *
+     * When we were able to connect to the TCP server, the method below will be called.
+     *
+     * @param ctx
+     * @throws Exception
+     */
     @Override
     public void channelActive(ChannelHandlerContext ctx) throws Exception {
         log.info("Connected to " + ctx.channel().remoteAddress());
@@ -73,6 +80,17 @@ public class TcpClientHandler extends SimpleChannelInboundHandler<Object> {
         }
     }
 
+    /**
+     *
+     * As soon as Netty detects an error on the channel (read timeout, or connection unavailable), this method will be called.
+     * When this happens we disconnect and schedule a reconnect defined by the reconnectDelayInSeconds param.
+     *
+     * This will also be called when we stop the processor. At that point, we gracefully shutdown the NioEventLoopGroup
+     *
+     *
+     * @param ctx
+     * @throws Exception
+     */
     @Override
     public void channelInactive(final ChannelHandlerContext ctx) throws Exception {
         log.info("Channel marked inactive. Disconnected from " + ctx.channel().remoteAddress());
@@ -107,10 +125,30 @@ public class TcpClientHandler extends SimpleChannelInboundHandler<Object> {
     }
 
 
+    /**
+     *
+     * The poll method is called from within the Processor onTrigger method.
+     * It fetches the message from the internal memory queue
+     *
+     * @return
+     * @throws InterruptedException
+     */
     public String poll() throws InterruptedException {
         return socketMessagesReceived.poll(POLLING_TIMEOUT_IN_MS, TimeUnit.MILLISECONDS);
     }
 
+    /**
+     *
+     * When data becomes available on the socket, it will trigger the method below.
+     * We'll read from the buffer untill we find the pre-defined delimiter.
+     * When we find the delimieter, we'll offer it to the queue so that it can be subsequently polled by the processor.
+     *
+     * In case we fail to convert a byte from the buffer we log an error, but continue processing.
+     *
+     * @param channelHandlerContext
+     * @param o
+     * @throws Exception
+     */
     protected void channelRead0(ChannelHandlerContext channelHandlerContext, Object o) throws Exception {
         ByteBuf in = (ByteBuf) o;
 
@@ -118,7 +156,16 @@ public class TcpClientHandler extends SimpleChannelInboundHandler<Object> {
         try {
             while (in.isReadable()) {
                 byte b = in.readByte();
+
+                if (log.isTraceEnabled()) {
+                    log.trace("Read byte " + ByteUtils.byteToHex(b));
+                }
+
                 if (b == delimiter) {
+                    if (log.isTraceEnabled()) {
+                        log.trace("Found delimiter, offering message : " + message.toString());
+                    }
+
                     socketMessagesReceived.offer(message.toString());
                     message = new StringBuffer();
                 } else {

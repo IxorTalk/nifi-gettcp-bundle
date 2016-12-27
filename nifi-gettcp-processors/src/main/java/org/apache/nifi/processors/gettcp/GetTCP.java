@@ -152,10 +152,20 @@ public final class GetTCP extends AbstractProcessor {
         byte delim = (byte)Integer.parseInt(context.getProperty(MSG_DELIMITER).getValue(), 16);
         Integer reconnectDelayInSeconds = context.getProperty(RECONNECT_DELAY).evaluateAttributeExpressions().asInteger();
 
-        getLogger().info("Scheduling GetTCP processor");
+        getLogger().info("Scheduling GetTCP processor with delimiter " + delim + " and reconnectDelayInSeconds " + reconnectDelayInSeconds);
         this.context = context;
         this.handler =  new TcpClientHandler(this, reconnectDelayInSeconds,delim);
-        connect();
+        ;
+
+        Runnable nettyConnect = () -> {
+
+            getLogger().info("Connecting Bootstrap");
+            g = new NioEventLoopGroup();
+            b = configureBootstrap(new Bootstrap(), g);
+            b.connect().addListener(new ConnectionListener(b,getLogger(),context.getProperty(RECONNECT_DELAY).evaluateAttributeExpressions().asInteger()));
+
+        };
+        new Thread(nettyConnect).start();
     }
 
     @OnStopped
@@ -163,18 +173,13 @@ public final class GetTCP extends AbstractProcessor {
         g.shutdownGracefully();
     }
 
-    private void connect() {
-        getLogger().info("Connecting Bootstrap");
-        g = new NioEventLoopGroup();
-        b = configureBootstrap(new Bootstrap(), g);
-        b.connect().addListener(new ConnectionListener(b,getLogger(),context.getProperty(RECONNECT_DELAY).evaluateAttributeExpressions().asInteger()));
-    }
-
     Bootstrap configureBootstrap(Bootstrap b, EventLoopGroup g) {
         String host = context.getProperty(SERVER_ADDRESS).evaluateAttributeExpressions().getValue();
         int port = context.getProperty(PORT).evaluateAttributeExpressions().asInteger();
-        getLogger().info("Configuring Bootstrap with address " + host + ":" + port);
         final ComponentLog log = getLogger();
+
+        getLogger().info("Configuring Bootstrap with address " + host + ":" + port);
+
         handler.setLog(log);
         b.group(g)
                 .channel(NioSocketChannel.class)
@@ -189,17 +194,8 @@ public final class GetTCP extends AbstractProcessor {
         return b;
     }
 
-    static String byteArrayToHex(byte[] a) {
-        StringBuilder sb = new StringBuilder(a.length * 2);
-        for(byte b: a)
-            sb.append(String.format(" [%02x]", b & 0xff));
-        return sb.toString();
-    }
-
     @Override
     public void onTrigger(ProcessContext context, ProcessSession session) throws ProcessException {
-        String host = context.getProperty(SERVER_ADDRESS).evaluateAttributeExpressions().getValue();
-        String port = context.getProperty(PORT).evaluateAttributeExpressions().getValue();
 
         try {
             final ComponentLog log = getLogger();
@@ -211,16 +207,21 @@ public final class GetTCP extends AbstractProcessor {
                 }
                 return;
             } else {
-                log.info("Read msg : " + messages);
+
+                if (log.isInfoEnabled()) {
+                    log.info("Read msg : " + messages);
+                }
+
                 if (log.isDebugEnabled()) {
-                    log.debug("Read msg (hex) : " + byteArrayToHex(messages.getBytes()));
+                    log.debug("Read msg (hex) : " + ByteUtils.byteArrayToHex(messages.getBytes()));
                 }
             }
 
             FlowFile flowFile = session.create();
             flowFile = session.write(flowFile, out -> out.write(messages.getBytes()));
-            flowFile = session.putAttribute(flowFile, "tcp.sender", host);
-            flowFile = session.putAttribute(flowFile, "tcp.port", port);
+
+            flowFile = session.putAttribute(flowFile, "tcp.sender", context.getProperty(SERVER_ADDRESS).evaluateAttributeExpressions().getValue());
+            flowFile = session.putAttribute(flowFile, "tcp.port", context.getProperty(PORT).evaluateAttributeExpressions().getValue());
 
             session.transfer(flowFile, REL_SUCCESS);
 
